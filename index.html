@@ -95,6 +95,61 @@ body {
   border-top: 1px solid var(--border-color);
 }
 
+.manual-edit-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-top: 4px;
+}
+
+.manual-edit-toggle:hover {
+  background: rgba(255, 255, 255, 1);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.manual-edit-toggle input[type="checkbox"] {
+  cursor: pointer;
+}
+
+.manual-edit-indicator {
+  font-size: 0.75rem;
+  font-family: var(--font-sans);
+  color: #059669;
+  font-weight: 500;
+  text-align: center;
+  padding: 4px 8px;
+  background: rgba(5, 150, 105, 0.1);
+  border-radius: 4px;
+  margin-top: 4px;
+}
+
+.suggestion.conflict {
+  background-color: rgba(251, 146, 60, 0.3);
+  cursor: not-allowed;
+}
+
+.popover-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  margin-left: 8px;
+}
+
+.popover-badge.conflict {
+  background: rgba(251, 146, 60, 0.2);
+  color: #c2410c;
+}
+
 .nav-info {
   background: rgba(255, 255, 255, 0.9);
   border: 1px solid var(--border-color);
@@ -923,6 +978,12 @@ body {
         <button class="popover-btn reject" id="popoverRejectBtn">Reject</button>
         <button class="popover-btn accept" id="popoverAcceptBtn">Accept</button>
     </div>
+    <!-- Allow Manual Edit toggle -->
+    <label class="manual-edit-toggle">
+      <input type="checkbox" id="allowManualEditCheckbox">
+      <span>Allow manual edit</span>
+    </label>
+    <div class="manual-edit-indicator" id="manualEditIndicator" style="display: none;">Manual editing enabled</div>
   </div>
   
   <!-- Selection actions (visible when text selected) -->
@@ -1082,6 +1143,10 @@ let selectedText = '';
 let selectedRange = null;
 let selectionMode = false;
 
+// Manual edit mode state
+let allowManualEdit = false;
+let lastTextValue = '';
+
 // DOM elements
 const undoBtn = document.getElementById('undoBtn');
 const documentInput = document.getElementById('documentInput');
@@ -1139,6 +1204,10 @@ const popoverExplanation = document.getElementById('popoverExplanation');
 const popoverOriginal = document.getElementById('popoverOriginal');
 const popoverCorrected = document.getElementById('popoverCorrected');
 const popoverAcceptBtn = document.getElementById('popoverAcceptBtn');
+
+// Manual edit mode elements
+const allowManualEditCheckbox = document.getElementById('allowManualEditCheckbox');
+const manualEditIndicator = document.getElementById('manualEditIndicator');
 const popoverRejectBtn = document.getElementById('popoverRejectBtn');
 
 // Hamburger menu events
@@ -1233,6 +1302,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   languageSelect.value       = localStorage.getItem('languagePref') || 'en-US';
   styleSelect.value          = localStorage.getItem('stylePref')    || 'literary_nonfiction';
 
+  // Initialize manual edit mode from localStorage
+  allowManualEdit = JSON.parse(localStorage.getItem('allowManualEdit') || 'false');
+  allowManualEditCheckbox.checked = allowManualEdit;
+  updateManualEditIndicator();
+
   freeModelsCheckbox.addEventListener('change', () =>
     localStorage.setItem('useFreeModels', freeModelsCheckbox.checked)
   );
@@ -1279,9 +1353,15 @@ In conclusion, this study have shown that the landscape of NLP is rapidly evolvi
   });
 
   documentInput.addEventListener('input', () => {
-      // If user types, clear corrections
+      // If user types in manual edit mode, track changes
       if (corrections.length > 0) {
-          resetState();
+          if (allowManualEdit) {
+              // Track changes and update positions
+              handleTextChange();
+          } else {
+              // Clear corrections in locked mode
+              resetState();
+          }
       }
       updateHighlightOverlay();
   });
@@ -1346,6 +1426,24 @@ downloadBtn.addEventListener('click', () => {
   URL.revokeObjectURL(url);
 });
 
+// Manual edit mode toggle handler
+allowManualEditCheckbox.addEventListener('change', () => {
+  allowManualEdit = allowManualEditCheckbox.checked;
+  localStorage.setItem('allowManualEdit', allowManualEdit);
+  updateManualEditIndicator();
+  
+  // If corrections exist, immediately apply/remove lock
+  if (corrections.length > 0) {
+    documentInput.readOnly = !allowManualEdit;
+    if (allowManualEdit) {
+      documentInput.classList.remove('locked');
+      lastTextValue = documentInput.value;
+    } else {
+      documentInput.classList.add('locked');
+    }
+  }
+});
+
 // Drag and drop handlers
 dropZone.addEventListener('dragover', handleDragOver);
 dropZone.addEventListener('dragleave', handleDragLeave);
@@ -1365,16 +1463,36 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   
-  if (e.key === 'ArrowRight') {
+  // In manual edit mode, let textarea handle its own input when focused
+  if (allowManualEdit && document.activeElement === documentInput && corrections.length > 0) {
+    // Use alternate shortcuts with modifiers
+    if (e.altKey && e.key === 'ArrowRight') {
+      e.preventDefault();
+      nextBtn.click();
+    } else if (e.altKey && e.key === 'ArrowLeft') {
+      e.preventDefault();
+      prevBtn.click();
+    } else if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      acceptCorrection(currentIndex);
+    } else if ((e.ctrlKey || e.metaKey) && (e.key === 'Backspace' || e.key === 'Delete')) {
+      e.preventDefault();
+      rejectCorrection(currentIndex);
+    }
+    return; // Let other keys pass through for normal typing
+  }
+  
+  // Standard shortcuts (work when not in manual edit mode or when textarea not focused)
+  if (e.key === 'ArrowRight' || (e.altKey && e.key === 'ArrowRight')) {
     e.preventDefault();
     nextBtn.click();
-  } else if (e.key === 'ArrowLeft') {
+  } else if (e.key === 'ArrowLeft' || (e.altKey && e.key === 'ArrowLeft')) {
     e.preventDefault();
     prevBtn.click();
-  } else if (e.key === 'Enter') {
+  } else if (e.key === 'Enter' || ((e.ctrlKey || e.metaKey) && e.key === 'Enter')) {
      e.preventDefault();
      acceptCorrection(currentIndex);
-  } else if (e.key === 'Backspace' || e.key === 'Delete') {
+  } else if ((e.key === 'Backspace' || e.key === 'Delete') || ((e.ctrlKey || e.metaKey) && (e.key === 'Backspace' || e.key === 'Delete'))) {
     if (corrections.length > 0) {        // only lock keys while corrections are active
         e.preventDefault();
       rejectCorrection(currentIndex);
@@ -1466,6 +1584,78 @@ function saveApiKey() {
     }
   }
 
+function updateManualEditIndicator() {
+  if (allowManualEdit && corrections.length > 0) {
+    manualEditIndicator.style.display = 'block';
+  } else {
+    manualEditIndicator.style.display = 'none';
+  }
+}
+
+function handleTextChange() {
+  const currentText = documentInput.value;
+  
+  if (!lastTextValue) {
+    lastTextValue = currentText;
+    return;
+  }
+  
+  // Detect change using simple diff algorithm
+  const oldText = lastTextValue;
+  const newText = currentText;
+  
+  // Find change start (first difference from beginning)
+  let changeStart = 0;
+  while (changeStart < oldText.length && changeStart < newText.length &&
+         oldText[changeStart] === newText[changeStart]) {
+    changeStart++;
+  }
+  
+  // Find change end (first difference from end)
+  let oldEnd = oldText.length;
+  let newEnd = newText.length;
+  while (oldEnd > changeStart && newEnd > changeStart &&
+         oldText[oldEnd - 1] === newText[newEnd - 1]) {
+    oldEnd--;
+    newEnd--;
+  }
+  
+  const removedLength = oldEnd - changeStart;
+  const insertedLength = newEnd - changeStart;
+  const lengthDelta = insertedLength - removedLength;
+  
+  // Update correction positions
+  for (let i = 0; i < corrections.length; i++) {
+    const corr = corrections[i];
+    
+    // Skip if already in conflict
+    if (corr.state === 'conflict') continue;
+    
+    const changeEnd = changeStart + removedLength;
+    const corrStart = corr.position.start;
+    const corrEnd = corr.position.end;
+    
+    // Check for overlapping change
+    if (changeStart < corrEnd && changeEnd > corrStart) {
+      // Change overlaps with correction - mark as conflict
+      corr.state = 'conflict';
+    } else if (corrStart >= changeEnd) {
+      // Correction is after the change - shift positions
+      corr.position.start += lengthDelta;
+      corr.position.end += lengthDelta;
+    }
+    // If correction is entirely before the change, no adjustment needed
+  }
+  
+  lastTextValue = currentText;
+  
+  // Use requestAnimationFrame to smooth out the redraw
+  requestAnimationFrame(() => {
+    updateHighlightOverlay();
+    updateActiveCorrection();
+  });
+}
+
 function resetState() {
     corrections = [];
     currentIndex = -1;
@@ -1473,9 +1663,11 @@ function resetState() {
     undoStack = [];
     undoBtn.style.display = 'none';
     documentInput.classList.remove('locked'); // <-- UNLOCK MOUSE EVENTS
+    lastTextValue = '';
     hidePopover();
     updateHighlightOverlay();
     updateNavigation();
+    updateManualEditIndicator();
 }
 
 function handleTextSelection() {
@@ -1883,6 +2075,8 @@ async function handleAnalysis() {
           start: foundAtIndex,
           end: foundAtIndex + corr.original.length
         };
+        // Initialize state field for manual edit mode
+        corr.state = 'active';
         mappedCorrections.push(corr);
         searchFromIndex = corr.position.end;
       } else {
@@ -1893,10 +2087,17 @@ async function handleAnalysis() {
     corrections = mappedCorrections;
 
     if (corrections.length > 0) {
-      documentInput.readOnly = true;        // Prevent typing
-      documentInput.classList.add('locked'); // <-- LOCK MOUSE EVENTS
+      // Conditionally lock based on manual edit mode
+      documentInput.readOnly = !allowManualEdit;
+      if (allowManualEdit) {
+        documentInput.classList.remove('locked');
+        lastTextValue = documentInput.value; // Initialize for change tracking
+      } else {
+        documentInput.classList.add('locked');
+      }
       currentIndex = 0;
       updateActiveCorrection();
+      updateManualEditIndicator();
     } else {
         // No corrections found, so ensure it's not locked
         documentInput.readOnly = false;
@@ -2110,7 +2311,8 @@ function updateHighlightOverlay() {
       html += escapeHtml(currentText.substring(lastPos, correction.position.start));
       
       const originalText = currentText.substring(correction.position.start, correction.position.end);
-      html += `<mark class="suggestion" data-index="${index}">${escapeHtml(originalText)}</mark>`;
+      const conflictClass = correction.state === 'conflict' ? ' conflict' : '';
+      html += `<mark class="suggestion${conflictClass}" data-index="${index}">${escapeHtml(originalText)}</mark>`;
       
       lastPos = correction.position.end;
     });
@@ -2164,7 +2366,19 @@ function showPopoverFor(element) {
     const correction = corrections[currentIndex];
     if (!correction) return;
 
-    popoverExplanation.textContent = correction.explanation;
+    // Build explanation with conflict badge if needed
+    if (correction.state === 'conflict') {
+      popoverExplanation.innerHTML = correction.explanation + '<span class="popover-badge conflict">Conflict</span><br><small style="color: #c2410c;">Cannot accept - text has been modified. Please reject or re-run analysis.</small>';
+      popoverAcceptBtn.disabled = true;
+      popoverAcceptBtn.style.opacity = '0.5';
+      popoverAcceptBtn.style.cursor = 'not-allowed';
+    } else {
+      popoverExplanation.textContent = correction.explanation;
+      popoverAcceptBtn.disabled = false;
+      popoverAcceptBtn.style.opacity = '1';
+      popoverAcceptBtn.style.cursor = 'pointer';
+    }
+    
     popoverOriginal.textContent = correction.original;
     popoverCorrected.textContent = correction.corrected;
     
@@ -2219,6 +2433,13 @@ function acceptCorrection(index) {
   if (index < 0 || index >= corrections.length) return;
 
   const correction = corrections[index];
+  
+  // Block acceptance if in conflict state
+  if (correction.state === 'conflict') {
+    alert('Cannot accept this correction - the text has been modified. Please reject it or re-run analysis.');
+    return;
+  }
+  
   const editedCorrectionText = popoverCorrected.textContent;
   
   // Calculate lengthDiff once, at the start
